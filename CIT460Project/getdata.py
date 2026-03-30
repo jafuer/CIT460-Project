@@ -3,6 +3,20 @@
 # This program collects data from Riot API and puts it in a local database file so that it can be used for data analysis.
 # PUUID is essentially just the player's ID
 
+# List of improvements to data fetching program in sprint 2:
+
+"""
+Added 10 features, but removed 7 of them due to overfitting model, kept both summoner spells and first blood
+
+Added threading so while one thread waits on the API, other threads can be processing data
+
+Added some logic to stop looping over the same matches and stalling out the program, implemented expovariate,
+which distributes over player match history more effectively
+
+Added BFS structure to find new players to stop program from stalling out
+
+"""
+
 
 import requests
 import sqlite3
@@ -10,8 +24,9 @@ import time
 import random
 import os
 import threading
+from collections import deque
 
-API_KEY = os.get_env("API_KEY")
+API_KEY = os.getenv("API_KEY")
 REGION = "americas"
 HEADERS = {"X-Riot-Token": API_KEY}
 
@@ -48,14 +63,17 @@ spells = {
     21: "Barrier"
 }
 def process_puuid(puuid):
-    conn = sqlite3.connect(r"C:\Users\james\OneDrive\Desktop\CIT460Project\league.db")      # moved connection and cursor inside of function to support multithreading
+    conn = sqlite3.connect(r"C:\Users\james\OneDrive\Desktop\CIT460Project\league.db")
     cursor = conn.cursor()
+
     match_count = random.randint(1, 5)
+
     if puuid in match_holder:
         cached_matches = match_holder[puuid]
     else:
         matchlist_url = f"https://{REGION}.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids"
-        params = {"queue": 420, "start": 0, "count": match_count}
+        params = {"queue": 420, "start": int(random.expovariate(1/30)), "count": match_count}   # changed from random int 0-50 to expovariate, which gets a better 
+                                                                                                # distribution so its not checking the same matches and stalling out
         cached_matches = safe_request(matchlist_url, params)
         if not cached_matches:
             conn.close()
@@ -63,14 +81,17 @@ def process_puuid(puuid):
         match_holder[puuid] = cached_matches
         rate_limit_sleep()
 
-    cursor.execute("SELECT match_id FROM matches_synced WHERE match_id IN ({seq})".format(
-        seq=','.join(['?']*len(cached_matches))
-    ), cached_matches)
-    existing_matches = set(row[0] for row in cursor.fetchall()) # converted previous logic to set for faster lookup
+    if not cached_matches:
+        conn.close()
+        return
 
-    inserted_any = False
-    participant_rows_all = []
-    matches_to_insert = []
+    cursor.execute(
+        "SELECT match_id FROM matches_synced WHERE match_id IN ({})".format(
+            ",".join(["?"] * len(cached_matches))
+        ),
+        cached_matches
+    )
+    existing_matches = set(row[0] for row in cursor.fetchall())
 
     for match_id in cached_matches:
         if match_id in existing_matches:
@@ -82,7 +103,8 @@ def process_puuid(puuid):
             continue
 
         info = match_data["info"]
-        matches_to_insert.append((match_id, info["gameDuration"], info["gameVersion"]))
+
+        participant_rows = []
 
         for participant in info["participants"]:
             position = participant.get("teamPosition")
@@ -111,7 +133,7 @@ def process_puuid(puuid):
             spell1 = spells.get(participant["summoner1Id"], "UNKNOWN")
             spell2 = spells.get(participant["summoner2Id"], "UNKNOWN")
 
-            participant_rows_all.append((
+            participant_rows.append((
                 match_id,
                 participant["puuid"],
                 champ,
@@ -127,28 +149,36 @@ def process_puuid(puuid):
                 spell2
             ))
 
-        inserted_any = True
+        if len(participant_rows) != 10:
+            continue
+
+        try:
+            cursor.execute("""
+                INSERT OR IGNORE INTO matches_synced (match_id, game_duration, game_version)
+                VALUES (?, ?, ?)
+            """, (match_id, info["gameDuration"], info["gameVersion"]))
+
+            cursor.executemany("""
+                INSERT OR IGNORE INTO participants (
+                    match_id, puuid, champion, position, win, kills, deaths, assists,
+                    gold_earned, cs, firstBloodKill, spell1, spell2
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, participant_rows)
+
+            conn.commit()
+        except Exception:
+            conn.rollback()
+
         rate_limit_sleep()
 
-    if inserted_any:
-        cursor.executemany("""
-            INSERT OR IGNORE INTO matches_synced (match_id, game_duration, game_version)
-            VALUES (?, ?, ?)
-        """, matches_to_insert)
-        cursor.executemany("""
-            INSERT OR IGNORE INTO participants (
-                match_id, puuid, champion, position, win, kills, deaths, assists, gold_earned, cs, firstBloodKill, spell1, spell2
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, participant_rows_all)
-        conn.commit()
     conn.close()
-
 def threaded_main(puuids, max_threads=3): # added threading, as one thread can wait on the API request while others are processing puuids or match data
+    
     def worker(puuid_list):
         for puuid in puuid_list:
             process_puuid(puuid)
 
-    chunks = [puuids[i::max_threads] for i in range(max_threads)] # just round robin seperation 
+    chunks = [puuids[i::max_threads] for i in range(max_threads)]
     threads = []
     for chunk in chunks:
         t = threading.Thread(target=worker, args=(chunk,))
@@ -213,16 +243,50 @@ def main():
     except ValueError:
         return
 
-    endTime = time.time() + (hours * 60 * 60)
-    rankIndex = 0
+    end_time = time.time() + (hours * 60 * 60)
+    rank_index = 0
 
-    while time.time() < endTime:
-        tier, division = rankDivisions[rankIndex]
-        puuids = get_rank_puuids(tier=tier, division=division)
-        if puuids:
-            threaded_main(puuids, max_threads=3)
-        rankIndex = (rankIndex + 1) % len(rankDivisions)
+    visited_puuids = set()
+    puuid_queue = deque()   # bfs to find new players, program was stalling out early
 
+    
+    tier, division = rankDivisions[rank_index]
+    seed_puuids = get_rank_puuids(tier=tier, division=division)
+    for p in seed_puuids:
+        puuid_queue.append(p)
+        visited_puuids.add(p)
 
+    while time.time() < end_time and puuid_queue:
+       
+        batch_size = 10
+        batch = []
+        for _ in range(min(batch_size, len(puuid_queue))):
+            batch.append(puuid_queue.popleft())
+
+        threaded_main(batch, max_threads=3)
+
+        
+        conn = sqlite3.connect(r"C:\Users\james\OneDrive\Desktop\CIT460Project\league.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT puuid FROM participants WHERE puuid NOT IN ({seq})".format(
+            seq=','.join(['?']*len(visited_puuids))
+        ), list(visited_puuids))
+        new_players = [row[0] for row in cursor.fetchall()]
+        conn.close()
+
+        for p in new_players:
+            if p not in visited_puuids:
+                puuid_queue.append(p)
+                visited_puuids.add(p)
+
+        
+        if len(puuid_queue) < 10:
+            rank_index = (rank_index + 1) % len(rankDivisions)
+            tier, division = rankDivisions[rank_index]
+            new_seeds = get_rank_puuids(tier=tier, division=division)
+            for p in new_seeds:
+                if p not in visited_puuids:
+                    puuid_queue.append(p)
+                    visited_puuids.add(p)
 if __name__ == "__main__":
     main()
