@@ -1,9 +1,10 @@
 # This program creates a json file so I can preview what comes with a full match call
 
 import json
+import os
 import requests
 
-API_KEY = "RGAPI-df04459c-2904-484c-add3-210261ef1697"
+API_KEY = os.getenv("API_KEY")
 REGION = "americas"
 match_id = "NA1_5522616279"
 
