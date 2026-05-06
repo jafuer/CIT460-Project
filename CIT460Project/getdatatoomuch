@@ -15,8 +15,6 @@ which distributes over player match history more effectively
 
 Added BFS structure to find new players to stop program from stalling out
 
-Added ranked snapshot reload every 30 minutes to refresh BFS
-
 """
 
 import requests
@@ -27,7 +25,7 @@ import os
 import threading
 from collections import deque
 
-API_KEY = ""
+API_KEY = "RGAPI-4698d77f-1489-4e83-b1fc-54656142d1ed"
 REGION = "americas"
 HEADERS = {"X-Riot-Token": API_KEY}
 
@@ -87,7 +85,7 @@ def process_puuid(puuid):
     conn = sqlite3.connect(r"C:\Users\james\OneDrive\Desktop\CIT460Project\league.db")
     cursor = conn.cursor()
 
-    match_count = 5
+    match_count = random.randint(1, 5)
 
     if puuid in match_holder:
         cached_matches = match_holder[puuid]
@@ -126,18 +124,16 @@ def process_puuid(puuid):
         info = match_data["info"]
 
         participant_rows = []
-        valid_match = True
 
         for participant in info["participants"]:
             position = participant.get("teamPosition")
-            team_id = participant.get("teamId")
             if position == "UTILITY":
                 position = "SUPPORT"
             if not position:
                 role = participant.get("role")
                 lane = participant.get("lane")
                 if role == "DUO_CARRY":
-                    position = "BOTTOM"
+                    position = "BOT"
                 elif role == "DUO_SUPPORT":
                     position = "SUPPORT"
                 elif lane == "JUNGLE":
@@ -145,13 +141,9 @@ def process_puuid(puuid):
                 elif lane == "TOP":
                     position = "TOP"
                 elif lane == "MID":
-                    position = "MIDDLE"
+                    position = "MID"
                 else:
                     position = None
-            if position is None:
-                valid_match = False
-                break
-            
 
             champ = participant["championName"]
             if champ == "MonkeyKing":
@@ -165,28 +157,33 @@ def process_puuid(puuid):
                 participant["puuid"],
                 champ,
                 position,
-                team_id,
-                1 if participant["win"] else 0, 
+                1 if participant["win"] else 0,
+                participant["kills"],
+                participant["deaths"],
+                participant["assists"],
+                participant["goldEarned"],
+                participant["totalMinionsKilled"],
+                1 if participant["firstBloodKill"] else 0,
                 spell1,
                 spell2
             ))
 
-        if not valid_match:
-            continue
         if len(participant_rows) != 10:
             continue
 
         try:
             with db_lock:
                 cursor.execute("""
-                    INSERT OR IGNORE INTO matches_synced (match_id, game_version)
-                    VALUES (?, ?)
-                """, (match_id, info["gameVersion"]))
+                    INSERT OR IGNORE INTO matches_synced (match_id, game_duration, game_version)
+                    VALUES (?, ?, ?)
+                """, (match_id, info["gameDuration"], info["gameVersion"]))
 
-                cursor.executemany(
-                    """INSERT OR IGNORE INTO participants (
-                        match_id, puuid, champion, position, teamId, win, spell1, spell2
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", participant_rows)
+                cursor.executemany("""
+                    INSERT OR IGNORE INTO participants (
+                        match_id, puuid, champion, position, win, kills, deaths, assists,
+                        gold_earned, cs, firstBloodKill, spell1, spell2
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, participant_rows)
 
                 conn.commit()
         except Exception:
@@ -260,41 +257,19 @@ rankDivisions = [
 ]
 
 def bfs_worker(tier, division, hours):
-    end_time = time.time() + hours * 3600
-
+    end_time = time.time() + hours*3600
     puuid_queue = deque(get_rank_puuids(tier=tier, division=division))
     with visited_lock:
         for p in puuid_queue:
             visited_puuids.add(p)
 
     batch_size = 10
-
-    reseed_interval = 1800
-    last_reseed = time.time()
-
     while time.time() < end_time and puuid_queue:
-
-       
-        if time.time() - last_reseed >= reseed_interval:
-            new_seeds = get_rank_puuids(tier=tier, division=division)
-            random.shuffle(new_seeds)
-
-            with visited_lock:
-                for p in new_seeds:
-                    if p not in visited_puuids:
-                        puuid_queue.append(p)
-                        visited_puuids.add(p)
-
-            last_reseed = time.time()
-
-        
         batch = []
-        for _ in range(min(batch_size, len(puuid_queue))):
+        for _ in range(min(batch_size,len(puuid_queue))):
             batch.append(puuid_queue.popleft())
+        threaded_main(batch,max_threads=3)
 
-        threaded_main(batch, max_threads=3)
-
-        
         conn = sqlite3.connect(r"C:\Users\james\OneDrive\Desktop\CIT460Project\league.db")
         cursor = conn.cursor()
         cursor.execute("SELECT DISTINCT puuid FROM participants")
@@ -302,7 +277,6 @@ def bfs_worker(tier, division, hours):
         conn.close()
 
         random.shuffle(new_players)
-
         with visited_lock:
             for p in new_players:
                 if p not in visited_puuids:

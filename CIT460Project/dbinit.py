@@ -9,11 +9,17 @@ cursor = conn.cursor()
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS matches_synced (
     match_id TEXT PRIMARY KEY,
-    game_duration INTEGER,
     game_version TEXT
 )
 """)
 
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS matches_diamond (
+    match_id TEXT PRIMARY KEY,
+    game_version TEXT
+)
+""")
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS participants (
@@ -22,13 +28,23 @@ CREATE TABLE IF NOT EXISTS participants (
     puuid TEXT,
     champion TEXT,
     position TEXT,
+    teamId INTEGER,
     win INTEGER,
-    kills INTEGER,
-    deaths INTEGER,
-    assists INTEGER,
-    gold_earned INTEGER,
-    cs INTEGER,
-    firstBloodKill INTEGER,
+    spell1 TEXT,
+    spell2 TEXT,
+    FOREIGN KEY(match_id) REFERENCES matches(match_id)
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS diamond_participants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id TEXT,
+    puuid TEXT,
+    champion TEXT,
+    position TEXT,
+    teamId INTEGER,
+    win INTEGER,
     spell1 TEXT,
     spell2 TEXT,
     FOREIGN KEY(match_id) REFERENCES matches(match_id)
@@ -36,8 +52,7 @@ CREATE TABLE IF NOT EXISTS participants (
 """)
 
 
-
-cursor.execute("CREATE INDEX IF NOT EXISTS idx_matchesync_match_id ON matches_synced(match_id);")
+cursor.execute("CREATE INDEX IF NOT EXISTS idx_matchesync_match_id ON matches_synced(match_id);") # indexed for faster lookup
 cursor.execute("CREATE INDEX IF NOT EXISTS idx_participants_match_id ON participants(match_id);")
 cursor.execute("CREATE INDEX IF NOT EXISTS idx_participants_puuid ON participants(puuid);")
 
